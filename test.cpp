@@ -11,8 +11,8 @@
 
 using namespace std;
 
-static const int FS_SIZE = 16 * 1024 * 1024; // 16MB
-static const int BLOCK_SIZE = 1024;          // 1KB
+static const int FS_SIZE = 16 * 1024 * 1024;
+static const int BLOCK_SIZE = 1024;
 static const int NUM_BLOCKS = FS_SIZE / BLOCK_SIZE;
 static const int MAX_INODES = 1024;          
 static const int DIRECT_PTRS = 10;
@@ -32,7 +32,7 @@ struct Superblock {
 
 struct Inode {
     bool used;
-    int size;              // in bytes
+    int size;
     time_t ctime;          
     int direct[DIRECT_PTRS];
     int indirect;          
@@ -124,44 +124,42 @@ public:
     }
 
     void cmd_createDir(const string &path) {
-    string ap = abs_path(path);
-    if (directories.count(ap)) {
-        cout << "Directory already exists\n";
-        return;
+        string ap = abs_path(path);
+        if (directories.count(ap)) {
+            cout << "Directory already exists\n";
+            return;
+        }
+
+        size_t lastSlash = ap.find_last_of('/');
+        string parent = ap.substr(0, lastSlash);
+        if (parent.empty()) parent = "/";
+        if (!directories.count(parent)) {
+            cout << "Error: Parent directory '" << parent << "' does not exist\n";
+            return;
+        }
+
+        int ino = alloc_inode();
+
+        if (ino < 0) { cout << "No free inode\n"; return; }
+        Inode &din = inodes[ino];
+        din.used = true;
+        din.is_directory = true;
+        din.ctime = time(nullptr);
+        
+        int block = alloc_block();
+        
+        if (block < 0) { 
+            cout << "No space for directory block\n"; 
+            inodes[ino] = Inode();
+            return; 
+        }
+        din.direct[0] = block;
+
+        directories[ap] = {};
+        string name = ap.substr(lastSlash + 1);
+        directories[parent].push_back({name, ino});
+        cout << "Directory created: " << ap << "\n";
     }
-
-    // Extract parent directory path
-    size_t lastSlash = ap.find_last_of('/');
-    string parent = ap.substr(0, lastSlash);
-    if (parent.empty()) parent = "/"; // Handle root case
-
-    // Check if parent directory exists
-    if (!directories.count(parent)) {
-        cout << "Error: Parent directory '" << parent << "' does not exist\n";
-        return;
-    }
-
-    // Proceed only if parent exists
-    int ino = alloc_inode();
-    if (ino < 0) { cout << "No free inode\n"; return; }
-    Inode &din = inodes[ino];
-    din.used = true;
-    din.is_directory = true;
-    din.ctime = time(nullptr);
-    
-    int block = alloc_block();
-    if (block < 0) { 
-        cout << "No space for directory block\n"; 
-        inodes[ino] = Inode(); // Rollback inode
-        return; 
-    }
-    din.direct[0] = block;
-
-    directories[ap] = {}; // Create new directory
-    string name = ap.substr(lastSlash + 1);
-    directories[parent].push_back({name, ino}); // Add entry to parent
-    cout << "Directory created: " << ap << "\n";
-}
 
     void cmd_deleteDir(const string &path) {
         string ap = abs_path(path);
@@ -188,71 +186,66 @@ public:
     }
 
     void cmd_changeDir(const string &path) {
-    if (path == "..") { // Handle ".." to move up
+        if (path == "..") {
         if (cwd == "/") {
             cout << "Already at root directory\n";
             return;
         }
-        // Compute parent path
+    
         size_t last_slash = cwd.find_last_of('/');
         string parent = cwd.substr(0, last_slash);
         if (parent.empty()) parent = "/";
-        // Check if parent exists
         if (!directories.count(parent)) {
             cout << "Parent directory not found\n";
             return;
         }
+
         cwd = parent;
         cout << "Current directory: " << cwd << "\n";
-    } else {
+        } else {
         string ap = abs_path(path);
         if (!directories.count(ap)) { 
             cout << "Directory not found\n"; 
             return; 
         }
+
         cwd = ap;
         cout << "Current directory: " << cwd << "\n";
+        }
     }
-}
 
     void cmd_dir() {
-    // Gather entries in two buckets
-    const auto& entries = directories[cwd];
-    std::vector<DirEntry> dirs, files;
-    for (const auto& e : entries) {
-        Inode& ino = inodes[e.inode_idx];
-        if (ino.is_directory) dirs.push_back(e);
-        else                 files.push_back(e);
-    }
-
-    // Comparator: sort by creation time ascending (oldest first).
-    auto cmp_ctime = [&](const DirEntry& a, const DirEntry& b) {
-        return inodes[a.inode_idx].ctime < inodes[b.inode_idx].ctime;
-    };
-
-    std::sort(dirs.begin(),  dirs.end(), cmp_ctime);
-    std::sort(files.begin(), files.end(), cmp_ctime);
-
-    // Lambda to print a single entry
-    auto print_entry = [&](const DirEntry& e) {
-        Inode& ino = inodes[e.inode_idx];
-        cout << (ino.is_directory ? "[DIR]  " : "[FILE] ")
-             << std::setw(20) << std::left << e.name;
-        if (ino.is_directory) {
-            int cnt = directories[abs_path(e.name)].size();
-            cout << " entries = " << cnt;
-        } else {
-            cout << " size = " << ino.size << "B";
+        const auto& entries = directories[cwd];
+        std::vector<DirEntry> dirs, files;
+        for (const auto& e : entries) {
+            Inode& ino = inodes[e.inode_idx];
+            if (ino.is_directory) dirs.push_back(e);
+            else                 files.push_back(e);
         }
-        // ctime() appends a newline, so no extra endl needed
-        cout << ", created = " << ctime(&ino.ctime);
-    };
 
-    // Print directories first...
-    for (const auto& d : dirs)   print_entry(d);
-    // ...then files
-    for (const auto& f : files)  print_entry(f);
-}
+        auto cmp_ctime = [&](const DirEntry& a, const DirEntry& b) {
+            return inodes[a.inode_idx].ctime < inodes[b.inode_idx].ctime;
+        };
+
+        std::sort(dirs.begin(),  dirs.end(), cmp_ctime);
+        std::sort(files.begin(), files.end(), cmp_ctime);
+
+        auto print_entry = [&](const DirEntry& e) {
+            Inode& ino = inodes[e.inode_idx];
+            cout << (ino.is_directory ? "[DIR]  " : "[FILE] ")
+                << std::setw(20) << std::left << e.name;
+            if (ino.is_directory) {
+                int cnt = directories[abs_path(e.name)].size();
+                cout << " entries = " << cnt;
+            } else {
+                cout << " size = " << ino.size << "B";
+            }
+            cout << ", created = " << ctime(&ino.ctime);
+        };
+
+        for (const auto& d : dirs)   print_entry(d);
+        for (const auto& f : files)  print_entry(f);
+    }
 
 
     void cmd_createFile(const string &path, int size_kb) {
@@ -265,16 +258,15 @@ public:
         string ap = abs_path(path);
 
         string parent = ap.substr(0, ap.find_last_of('/'));
-    if (parent.empty()) parent = "/";
-    string name = ap.substr(ap.find_last_of('/') + 1);
+        if (parent.empty()) parent = "/";
+        string name = ap.substr(ap.find_last_of('/') + 1);
 
-    // Check if name already exists in parent directory
-    for (const auto& entry : directories[parent]) {
-        if (entry.name == name) {
-            cout << "Error: A file or directory with the name '" << name << "' already exists\n";
-            return;
+        for (const auto& entry : directories[parent]) {
+            if (entry.name == name) {
+                cout << "Error: A file or directory with the name '" << name << "' already exists\n";
+                return;
+            }
         }
-    }
 
         int ino_idx = alloc_inode();
         if (ino_idx < 0) { cout << "No free inode\n"; return; }
@@ -304,6 +296,7 @@ public:
                 inodes[ino_idx] = Inode();
                 return; 
             }
+
             fin.indirect = ib;
             int *ptrs = reinterpret_cast<int*>(data_blocks[ib]);
             for (int i = 0; i < needed - DIRECT_PTRS; ++i) {
@@ -335,9 +328,11 @@ public:
         string ap = abs_path(path);
         int ino_idx = lookup_inode(path);
         if (ino_idx < 0) { cout << "File not found\n"; return; }
+
         Inode &fin = inodes[ino_idx];
         for (int i = 0; i < DIRECT_PTRS; ++i) 
             free_block(fin.direct[i]);
+
         if (fin.indirect >= 0) {
             int *ptrs = reinterpret_cast<int*>(data_blocks[fin.indirect]);
             for (int i = 0; i < BLOCK_SIZE / sizeof(int); ++i) {
@@ -346,126 +341,125 @@ public:
             }
             free_block(fin.indirect);
         }
+
         inodes[ino_idx] = Inode();
         string parent = ap.substr(0, ap.find_last_of('/'));
+
         if (parent.empty()) parent = "/";
         string name = ap.substr(ap.find_last_of('/') + 1);
         auto &pe = directories[parent];
         pe.erase(remove_if(pe.begin(), pe.end(), [&](const DirEntry &d) { 
             return d.name == name; 
         }), pe.end());
+
         cout << "File deleted: " << ap << "\n";
     }
 
     void cmd_cp(const string &src, const string &dst) {
-    int sidx = lookup_inode(src);
-    if (sidx < 0) {
-        cout << "Source not found\n";
-        return;
-    }
-    Inode &sin = inodes[sidx];
-    string abs_src = abs_path(src);
-    string abs_dst = abs_path(dst);
-
-    // --- 1) If it's a directory, create dst dir and recurse ---
-    if (sin.is_directory) {
-        // Create the destination directory (will error if it already exists)
-        if (abs_dst == abs_src || abs_dst.find(abs_src + "/") == 0) {
-        cout << "Error: Cannot copy a directory into its subdirectory\n";
-        return;
-    }
-        cmd_createDir(dst);
-
-        // Now recurse over every entry in the source directory
-        for (auto &entry : directories[abs_src]) {
-            string child_name = entry.name;
-            string child_src = abs_src + "/" + child_name;
-            string child_dst = abs_dst + "/" + child_name;
-            cmd_cp(child_src, child_dst);
-        }
-        return;
-    }
-
-    // --- 2) Otherwise, it's a file: do the block‐by‐block copy ---
-    int didx = alloc_inode();
-    if (didx < 0) {
-        cout << "No free inode\n";
-        return;
-    }
-    Inode &din = inodes[didx];
-    din.used = true;
-    din.size = sin.size;
-    din.ctime = time(nullptr);
-
-    // Copy direct blocks
-    for (int i = 0; i < DIRECT_PTRS; ++i) {
-        if (sin.direct[i] < 0) break;
-        int nb = alloc_block();
-        if (nb < 0) {
-            cout << "No space during copy\n";
-            inodes[didx] = Inode();
+        int sidx = lookup_inode(src);
+        if (sidx < 0) {
+            cout << "Source not found\n";
             return;
         }
-        memcpy(data_blocks[nb], data_blocks[sin.direct[i]], BLOCK_SIZE);
-        din.direct[i] = nb;
-    }
 
-    // Copy indirect blocks
-    if (sin.indirect >= 0) {
-        int nib = alloc_block();
-        if (nib < 0) {
-            for (int i = 0; i < DIRECT_PTRS; ++i)
-                if (din.direct[i] >= 0) free_block(din.direct[i]);
-            inodes[didx] = Inode();
-            cout << "No space during copy\n";
+        Inode &sin = inodes[sidx];
+        string abs_src = abs_path(src);
+        string abs_dst = abs_path(dst);
+
+        if (sin.is_directory) {
+            if (abs_dst == abs_src || abs_dst.find(abs_src + "/") == 0) {
+            cout << "Error: Cannot copy a directory into its subdirectory\n";
+            return;
+            }
+            cmd_createDir(dst);
+
+            for (auto &entry : directories[abs_src]) {
+                string child_name = entry.name;
+                string child_src = abs_src + "/" + child_name;
+                string child_dst = abs_dst + "/" + child_name;
+                cmd_cp(child_src, child_dst);
+            }
             return;
         }
-        din.indirect = nib;
-        int *sptrs = reinterpret_cast<int*>(data_blocks[sin.indirect]);
-        int *dptrs = reinterpret_cast<int*>(data_blocks[nib]);
-        for (int i = 0; i < BLOCK_SIZE / sizeof(int); ++i) {
-            if (sptrs[i] <= 0) break;
+
+        int didx = alloc_inode();
+        if (didx < 0) {
+            cout << "No free inode\n";
+            return;
+        }
+
+        Inode &din = inodes[didx];
+        din.used = true;
+        din.size = sin.size;
+        din.ctime = time(nullptr);
+
+        for (int i = 0; i < DIRECT_PTRS; ++i) {
+            if (sin.direct[i] < 0) break;
             int nb = alloc_block();
             if (nb < 0) {
-                for (int j = 0; j < DIRECT_PTRS; ++j)
-                    if (din.direct[j] >= 0) free_block(din.direct[j]);
-                free_block(nib);
+                cout << "No space during copy\n";
+                inodes[didx] = Inode();
+                return;
+            }
+
+            memcpy(data_blocks[nb], data_blocks[sin.direct[i]], BLOCK_SIZE);
+            din.direct[i] = nb;
+        }
+
+        if (sin.indirect >= 0) {
+            int nib = alloc_block();
+            if (nib < 0) {
+                for (int i = 0; i < DIRECT_PTRS; ++i)
+                    if (din.direct[i] >= 0) free_block(din.direct[i]);
                 inodes[didx] = Inode();
                 cout << "No space during copy\n";
                 return;
             }
-            memcpy(data_blocks[nb], data_blocks[sptrs[i]], BLOCK_SIZE);
-            dptrs[i] = nb;
-        }
-    }
 
-    // Finally, link into the parent directory of dst
-    string parent = abs_dst.substr(0, abs_dst.find_last_of('/'));
-    if (parent.empty()) parent = "/";
-    string name = abs_dst.substr(abs_dst.find_last_of('/') + 1);
+            din.indirect = nib;
+            int *sptrs = reinterpret_cast<int*>(data_blocks[sin.indirect]);
+            int *dptrs = reinterpret_cast<int*>(data_blocks[nib]);
 
-    // Prevent overwriting an existing entry
-    for (auto &entry : directories[parent]) {
-        if (entry.name == name) {
-            cout << "Error: Target '" << name << "' already exists\n";
-            // Rollback
-            for (int i = 0; i < DIRECT_PTRS && din.direct[i] >= 0; ++i)
-                free_block(din.direct[i]);
-            if (din.indirect >= 0) {
-                int *ptrs = reinterpret_cast<int*>(data_blocks[din.indirect]);
-                for (int i = 0; i < BLOCK_SIZE / sizeof(int); ++i)
-                    if (ptrs[i] > 0) free_block(ptrs[i]);
-                free_block(din.indirect);
+            for (int i = 0; i < BLOCK_SIZE / sizeof(int); ++i) {
+                if (sptrs[i] <= 0) break;
+                int nb = alloc_block();
+                if (nb < 0) {
+                    for (int j = 0; j < DIRECT_PTRS; ++j)
+                        if (din.direct[j] >= 0) free_block(din.direct[j]);
+                    free_block(nib);
+                    inodes[didx] = Inode();
+                    cout << "No space during copy\n";
+                    return;
+                }
+                memcpy(data_blocks[nb], data_blocks[sptrs[i]], BLOCK_SIZE);
+                dptrs[i] = nb;
             }
-            inodes[didx] = Inode();
-            return;
         }
+
+        string parent = abs_dst.substr(0, abs_dst.find_last_of('/'));
+        if (parent.empty()) parent = "/";
+        string name = abs_dst.substr(abs_dst.find_last_of('/') + 1);
+
+        for (auto &entry : directories[parent]) {
+            if (entry.name == name) {
+                cout << "Error: Target '" << name << "' already exists\n";
+                for (int i = 0; i < DIRECT_PTRS && din.direct[i] >= 0; ++i)
+                    free_block(din.direct[i]);
+                if (din.indirect >= 0) {
+                    int *ptrs = reinterpret_cast<int*>(data_blocks[din.indirect]);
+                    for (int i = 0; i < BLOCK_SIZE / sizeof(int); ++i)
+                        if (ptrs[i] > 0) free_block(ptrs[i]);
+                    free_block(din.indirect);
+                }
+
+                inodes[didx] = Inode();
+                return;
+            }
+        }
+
+        directories[parent].push_back({name, didx});
+        cout << "Copied " << src << " to " << dst << "\n";
     }
-
-    directories[parent].push_back({name, didx});
-    cout << "Copied " << src << " to " << dst << "\n";
-}
-
 
     void cmd_sum() {
         cout << "Total blocks: " << sb.total_blocks
@@ -485,6 +479,7 @@ public:
             cout.write(data_blocks[b], toRead);
             read += toRead;
         }
+
         if (read < fin.size && fin.indirect >= 0) {
             int *ptrs = reinterpret_cast<int*>(data_blocks[fin.indirect]);
             for (int i = 0; i < BLOCK_SIZE / sizeof(int) && read < fin.size; ++i) {
@@ -502,13 +497,13 @@ public:
         ofstream out(file, ios::binary);
         out.write((char*)&sb.total_blocks, sizeof(sb.total_blocks));
         out.write((char*)&sb.free_blocks, sizeof(sb.free_blocks));
+
         for (size_t i = 0; i < sb.block_bitmap.size(); ++i) {
             bool b = sb.block_bitmap[i];
             out.write((char*)&b, sizeof(b));
         }
         for (auto &ino : inodes) out.write((char*)&ino, sizeof(ino));
 
-        // Serialize directories (C++11 compatible)
         size_t dirCount = directories.size();
         out.write((char*)&dirCount, sizeof(dirCount));
         for (const auto& pair : directories) {
@@ -541,9 +536,9 @@ public:
             in.read((char*)&b, sizeof(b));
             sb.block_bitmap[i] = b;
         }
+
         for (auto &ino : inodes) in.read((char*)&ino, sizeof(ino));
 
-        // Deserialize directories
         size_t dirCount;
         in.read((char*)&dirCount, sizeof(dirCount));
         directories.clear();
@@ -579,7 +574,7 @@ public:
         load_image();
         string line;
         while (true) {
-            cout << "UnixFS " << cwd << " > "; // Update this line
+            cout << "UnixFS " << cwd << " > ";
             if (!getline(cin, line)) break;
             string cmd;
             stringstream ss(line);
